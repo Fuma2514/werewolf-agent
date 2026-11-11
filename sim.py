@@ -297,14 +297,35 @@ rng = random.Random(1234)
 res = {"werewolf": [0,0], "seer": [0,0], "doctor": [0,0], "villager": [0,0]}
 va_wolf_votes = [0,0]
 days = []
+DIAG = []
+import os as _os
 for i in range(N):
     role = ["werewolf"]*15 + ["seer"]*5 + ["doctor"]*5 + ["villager"]*5
     r = role[i % 30]
-    g = Game(random.Random(rng.randrange(1<<30)), r)
-    out = g.run(rng)
+    g = Game(random.Random(777000 + i), r)
+    out = g.run(random.Random(555000 + i))
     win = out["winner"] == ("werewolves" if r == "werewolf" else "village")
     res[r][0] += win; res[r][1] += 1
     if win and out["winner"]: days.append(out["day"])
+    if _os.environ.get("SIM_DIAG"):
+        claims, findings, cred = g.table(0)
+        DIAG.append({"role": r, "win": win, "day": out["day"], "reason": out["reason"],
+                     "me_alive": g.alive[g.me], "died": g.revealed[g.me],
+                     "claims": len(set(claims)), "findings": len(findings),
+                     "exiles": [(e["seat"], e.get("role")) for e in g.log if e.get("kind") == "exile"],
+                     "wolves_left": sum(1 for s in g.alive if g.alive[s] and g.role_of[s]=="werewolf")})
+if _os.environ.get("SIM_DIAG"):
+    for r in ("seer","doctor","villager"):
+        games = [d for d in DIAG if d["role"] == r]
+        lost = [d for d in games if not d["win"]]
+        print(r, "lost", len(lost), "/", len(games),
+              "| me dead in", sum(1 for d in lost if not d["me_alive"]),
+              "| claims>=1 in", sum(1 for d in lost if d["claims"] >= 1),
+              "| wolves_left avg %.1f" % (sum(d["wolves_left"] for d in lost)/max(1,len(lost))),
+              "| day avg %.1f" % (sum(d["day"] for d in lost)/max(1,len(lost))))
+        from collections import Counter as _C
+        print("   reasons", _C(d["reason"] for d in lost), "| win days", _C(d["day"] for d in games if d["win"]))
+        print("   exiled wolves in losses avg %.1f" % (sum(sum(1 for s,rl in d["exiles"] if rl=="werewolf") for d in lost)/max(1,len(lost))))
 w = res["werewolf"]; v = res["seer"]; d = res["doctor"]; vv = res["villager"]
 village_w = (v[0]+d[0]+vv[0]) / max(1,(v[1]+d[1]+vv[1]))
 print("wolf  : %d/%d = %.2f" % (w[0], w[1], w[0]/max(1,w[1])))

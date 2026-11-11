@@ -376,6 +376,9 @@ def seer_inspect(g, options, seed):
     unknown = [s for s in options if s not in inspected]
     if not unknown:
         return options[0] if options else None
+    if g.day == 1 and not g.accusations:
+        # the wolves' night-1 kill lands on the lowest non-wolf seat: inspect elsewhere
+        return max(unknown)
     # prefer the seat the table already suspects: a hit there converts to votes
     acc = {}
     for a in g.accusations:
@@ -439,6 +442,10 @@ def village_vote(g, options, seed):
                 (cred.get(f["seat"], 0) >= 3 or
                  (len(claimants) == 1 and cred.get(f["seat"], 0) >= 1)):
             return f["target"]
+    unverified = [c for c in claimants if cred.get(c, 0) < 3 and c in options
+                  and c not in g.known_village]
+    if unverified:
+        return unverified[-1]
     pick = top_by(g.sus, options)
     # never vote a credible living seer claimant
     cred = g._seer_cred()
@@ -572,10 +579,14 @@ def village_statement(g, seed):
             return ("Seat %d checked seat %d and found a WEREWOLF; that checks out. "
                     "Everyone vote seat %d." % (f["seat"], f["target"], f["target"]))[:500]
     claimants = [c for c in g._claimants("seer") if g.players[c]["alive"]]
-    if len(claimants) == 1 and cred.get(claimants[0], 0) >= 1:
+    if len(claimants) == 1 and cred.get(claimants[0], 0) >= 3:
         c = claimants[0]
         return ("Seat %d is the only seer claim and their results have held up. "
                 "Trust them; I will follow their inspections." % c)[:500]
+    if claimants and all(cred.get(c, 0) < 3 for c in claimants):
+        c = max(claimants)
+        return ("Seat %d claims to be the seer but nothing they said has checked out. "
+                "A fake seer claim is the wolf's oldest trick. Vote seat %d." % (c, c))[:500]
     if len(claimants) > 1:
         return ("We have two seer claims, so one is a lying wolf. Seat %s, defend "
                 "yourselves with details; I will vote the less convincing one."
