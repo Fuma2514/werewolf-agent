@@ -66,66 +66,116 @@ class Game:
             self.outcome = {"winner":"werewolves","reason":"parity","day":self.day}
         return self.outcome
 
+    def table(self, seat):
+        """Parse the public record: seer claims, findings, credibility."""
+        import re as _re
+        claims, findings = [], []
+        for e in self.log:
+            if e["kind"] != "speech": continue
+            t = e.get("text") or ""
+            if _re.search(r"I am the seer|I inspected|my inspection", t):
+                claims.append(e["seat"])
+            for m in _re.finditer(r"(?:inspected|checked)\s+(?:seat\s*)?(\d)", t.lower()):
+                tgt = int(m.group(1))
+                tail = t.lower()[m.end():m.end()+60]
+                wolf = bool(_re.search(r"(werewolf|WOLF)", tail)) and not _re.search(r"not\s+a", tail)
+                findings.append({"seat": e["seat"], "target": tgt, "wolf": wolf})
+        # credibility: findings that match revealed roles
+        cred = {}
+        for c in set(claims):
+            sc = 1.0
+            if len(set(claims)) > 1: sc -= 2.0
+            for f in findings:
+                if f["seat"] != c: continue
+                role = self.revealed.get(f["target"])
+                if role is None: continue
+                if f["wolf"] and role == "werewolf": sc += 4.0
+                elif f["wolf"] != (role == "werewolf"): sc -= 5.0
+                else: sc += 1.5
+            cred[c] = sc
+        return claims, findings, cred
+
     def house_decide(self, seat, kind, options=None, wolf_first_pick=None):
-        """Scripted house bot: paranoid accuser, votes most-accused."""
+        """Scripted house bot ~ haiku: follows claims, bandwagons, wolves hunt claimants."""
+        import re as _re
         alive_others = [s for s in sorted(self.alive) if self.alive[s] and s != seat]
+        claims, findings, cred = self.table(seat)
+        trusted = [c for c in sorted(cred) if cred[c] >= 3 and self.alive.get(c)]
+        sole_claim = [c for c in sorted(set(claims)) if self.alive.get(c)]
         if kind == "speak":
-            # accuse the seat most accused so far, or lowest alive
+            if seat in self.wolves:
+                # fake claim sometimes; otherwise frame a trusted/non-wolf
+                if rng.random() < 0.2 and len(set(claims)) <= 2 and not any(f["seat"]==seat for f in findings):
+                    tgt = next((s for s in alive_others if s not in self.wolves and self.alive.get(s)), None)
+                    if tgt:
+                        txt = "I am the seer. I inspected seat %d: WEREWOLF. Vote seat %d." % (tgt, tgt)
+                        self.speak(seat, txt); return {"text": txt}
+                pool = [s for s in alive_others if s not in self.wolves]
+                tgt = pool[0] if pool else None
+                if trusted:
+                    tgt = trusted[0]
+                elif sole_claim and rng.random() < 0.5:
+                    tgt = sole_claim[0]
+                if tgt:
+                    txt = "I do not trust seat %d; they are likely the wolf." % tgt
+                    self.speak(seat, txt); return {"text": txt}
+                return {"pass": True}
+            # village house
+            if trusted:
+                f = next((x for x in reversed(findings) if x["seat"] in trusted and x["wolf"] and self.alive.get(x["target"])), None)
+                if f:
+                    txt = "Seat %d is the seer and found seat %d is a wolf. Vote seat %d." % (f["seat"], f["target"], f["target"])
+                    self.speak(seat, txt); return {"text": txt}
+                txt = "Trust seat %d, the real seer. Follow their inspections." % trusted[0]
+                self.speak(seat, txt); return {"text": txt}
             tally = {}
             for e in self.log:
-                if e["kind"]=="speech" and e["seat"]!=seat and seat not in (self.wolves):
-                    for m in __import__("re").finditer(r"seat\s*(\d)", e["text"]):
+                if e["kind"]=="speech" and e["seat"]!=seat:
+                    for m in _re.finditer(r"seat\s*(\d)", e["text"]):
                         tally[int(m.group(1))] = tally.get(int(m.group(1)),0)+1
-            if seat in self.wolves:
-                # house wolf: accuse a non-wolf
-                tgt = next((s for s in alive_others if self.role_of[s]!="werewolf"), None)
-                if tally and rng.random() < 0.5:
-                    best = max(tally, key=tally.get)
-                    if best not in self.wolves and self.alive.get(best): tgt = best
-                self.speak(seat, "I think seat %d is acting suspicious." % tgt) if tgt else self.speak(seat, "I have no strong read yet.")
-                return {"text": "I think seat %d is acting suspicious." % tgt} if tgt else {"pass": True}
             if tally:
                 best = max(tally, key=tally.get)
                 if self.alive.get(best) and best != seat:
-                    self.speak(seat, "Seat %d is the wolf, vote seat %d." % (best, best))
-                    return {"text": "Seat %d is the wolf, vote seat %d." % (best, best)}
-            self.speak(seat, "No wolf found yet, keep watching seat %d." % alive_others[0])
-            return {"text": "No wolf found yet, keep watching seat %d." % alive_others[0]}
+                    txt = "Seat %d is the wolf, vote seat %d." % (best, best)
+                    self.speak(seat, txt); return {"text": txt}
+            txt = "No wolf found yet, keep watching seat %d." % alive_others[0]
+            self.speak(seat, txt); return {"text": txt}
         if kind == "vote":
             tally = {}
             for e in self.log:
                 if e["kind"]=="vote" and e["day"]==self.day and e["target"]:
                     tally[e["target"]] = tally.get(e["target"],0)+1
             if seat in self.wolves:
-                pool = [s for s in alive_others if self.role_of[s]!="werewolf"]
+                pool = [s for s in alive_others if s not in self.wolves]
                 if not pool: return {"target": None}
-                cand = {t: n for t, n in tally.items() if t in pool and t != seat}
-                if cand:
-                    best = max(cand, key=cand.get)
-                    if best and cand[best] >= 2: return {"target": best}
+                cand = {t: n for t, n in tally.items() if t in pool}
+                if cand and max(cand.values()) >= 2: return {"target": max(cand, key=cand.get)}
                 return {"target": pool[0]}
-            if tally:
-                best = max(tally, key=tally.get)
-                if best != seat and self.alive.get(best): return {"target": best}
+            # village house: follow trusted seer finding, else bandwagon
+            for x in reversed(findings):
+                if x["wolf"] and x["seat"] in trusted and self.alive.get(x["target"]) and x["target"] != seat:
+                    return {"target": x["target"]}
+            cand = {t: n for t, n in tally.items() if t != seat and self.alive.get(t)}
+            if cand and max(cand.values()) >= 2: return {"target": max(cand, key=cand.get)}
             return {"target": alive_others[0]} if alive_others else {"target": None}
         if kind == "kill":
-            # house wolf kill: the loudest accuser of wolves, else lowest
+            pool = [s for s in alive_others if s not in self.wolves]
+            # kill a seer claimant (esp. with findings) first
+            for c in sole_claim:
+                if c in pool and cred.get(c, 0) >= 1: return {"target": c}
             acc = {}
             for e in self.log:
                 if e["kind"]=="speech" and e["seat"] not in self.wolves and \
-                        any(w in e["text"] for w in ("wolf","Wolf")):
+                        _re.search(r"wolf|werewolf", e.get("text") or ""):
                     acc[e["seat"]] = acc.get(e["seat"],0)+1
-            pool = [s for s in alive_others if self.role_of[s]!="werewolf"]
             if acc:
                 best = max(acc, key=acc.get)
                 if best in pool: return {"target": best}
             return {"target": pool[0]} if pool else {"target": None}
         if kind == "protect":
-            # house doctor: protect the sole seer claimant
-            claims = [e["seat"] for e in self.log if e["kind"]=="speech"
-                      and "I am the seer" in e["text"] and self.alive.get(e["seat"])
-                      and e["seat"] != self.last_protect]
-            if claims: return {"target": claims[0]}
+            done = getattr(self, "_prot", None)
+            claims_alive = [c for c in sole_claim if c in alive_others and c != self.last_protect]
+            if claims_alive: return {"target": claims_alive[0]}
             pool = [s for s in alive_others if s != self.last_protect]
             return {"target": pool[0]} if pool else {"target": None}
         if kind == "inspect":

@@ -300,7 +300,16 @@ class GameState:
                 sus[voter] -= 1.2
             elif r != WOLF and sus.get(voter, 0) > -50:
                 sus[voter] += 1.0
-        # voting-when-accused-of-nothing baseline decay toward 1.0 for quiet players
+        # a claim that calls a known-village seat a wolf is a proven lie
+        for f in self.findings:
+            if f["wolf"] and f["target"] in self.known_village and \
+                    f["seat"] not in self.known_village:
+                sus[f["seat"]] = sus.get(f["seat"], 0) + 10.0
+            # a claimant who called a revealed wolf "clean" too
+            if not f["wolf"] and f["target"] in self.known_wolves and \
+                    f["seat"] not in self.known_village:
+                sus[f["seat"]] = sus.get(f["seat"], 0) + 6.0
+        # quiet decay: return baseline
         return sus
 
     def _threat(self):
@@ -424,9 +433,11 @@ def village_vote(g, options, seed):
     lead, n = plurality(cur)
     # follow a trusted seer's wolf finding
     cred = g._seer_cred()
+    claimants = g._claimants("seer")
     for f in reversed(g.findings):
-        if f["wolf"] and cred.get(f["seat"], 0) >= 3 and f["target"] in options \
-                and g.players[f["target"]]["alive"]:
+        if f["wolf"] and f["target"] in options and g.players[f["target"]]["alive"] and \
+                (cred.get(f["seat"], 0) >= 3 or
+                 (len(claimants) == 1 and cred.get(f["seat"], 0) >= 1)):
             return f["target"]
     pick = top_by(g.sus, options)
     # never vote a credible living seer claimant
@@ -473,32 +484,38 @@ def refs_str(g, seat):
     return "seat %d" % seat
 
 
+def my_prior_target(g):
+    """The seat our own earlier statements accused, if still alive."""
+    for d, seat, text in reversed(g.speeches):
+        if seat != g.me:
+            continue
+        for tgt in g._refs(text):
+            if tgt != g.me and g.players[tgt]["alive"] and tgt not in g.known_village:
+                return tgt
+    return None
+
+
 def seer_statement(g, seed):
     results = sorted((g.view.get("seerResults") or []), key=lambda r: r["night"])
     cred = g._seer_cred()
     rival = [c for c in g._claimants("seer") if c != g.me]
     wolf_hits = [r for r in results if r["werewolf"]]
     parts = []
-    if wolf_hits:
-        r = wolf_hits[-1]
-        parts.append("I am the seer. Night %d I inspected %s: WEREWOLF."
-                     % (r["night"], refs_str(g, r["seat"])))
-        if len(wolf_hits) > 1:
-            parts.append("My other findings: " + "; ".join(
-                "%s %s" % (refs_str(g, x["seat"]), "WOLF" if x["werewolf"] else "clean")
-                for x in wolf_hits[:-1]))
-        cleans = [r for r in results if not r["werewolf"]]
-        if cleans:
-            parts.append("Also clean: " + ", ".join(refs_str(g, r["seat"]) for r in cleans))
-        if wolf_hits[-1]["seat"] in options_alive(g):
-            parts.append("Vote seat %d today." % wolf_hits[-1]["seat"])
+    alive_hits = [r for r in wolf_hits if g.players[r["seat"]]["alive"]]
+    if alive_hits:
+        r = alive_hits[-1]
+        return ("I am the seer. Night %d I inspected seat %d: WEREWOLF. "
+                "Seat %d is a werewolf. Vote seat %d today, do not vote anyone else."
+                % (r["night"], r["seat"], r["seat"], r["seat"]))[:500]
     else:
         found = ["%s clean" % refs_str(g, r["seat"]) for r in results]
         if rival:
-            parts.append("I am the real seer; seat %s is lying, I will inspect them tonight."
-                         % ", seat ".join(str(c) for c in rival))
+            return ("I am the real seer; seat %s is lying. I inspected my results myself: "
+                    "%s. Vote out the liar." % (", seat ".join(str(c) for c in rival),
+                                                ", ".join(found) if found else "none yet"))[:500]
         elif g.day >= 2 or len(results) >= 2:
-            parts.append("I am the seer. My inspections: " + (", ".join(found) if found else "none yet") + ".")
+            return ("I am the seer. My inspections: %s. Trust these results and my votes."
+                    % (", ".join(found) if found else "none yet"))[:500]
         else:
             return None  # stay hidden night 1 with no wolf found
     if len(parts) == 0:
@@ -566,6 +583,11 @@ def village_statement(g, seed):
     cur = current_votes(g)
     lead, n = plurality(cur)
     pick = top_by(g.sus, [s for s in g.alive_seats if s != g.me])
+    # stickiness: keep hammering our earlier accusation while it stays plausible
+    prior = my_prior_target(g)
+    if prior is not None and pick is not None and \
+            g.sus.get(prior, 0) >= g.sus.get(pick, 0) - 2.0:
+        pick = prior
     if lead is not None and pick is not None and lead != pick and n >= 2 \
             and g.sus.get(lead, 0) >= g.sus.get(pick, 0) - 1.0:
         return "I also suspect seat %d. Voting seat %d with the group." % (lead, lead)[:500]
@@ -573,7 +595,8 @@ def village_statement(g, seed):
         return None
     why = "has accused without evidence" if any(a["target"] == pick for a in g.accusations) \
         else "has been too quiet and their votes look odd"
-    return "Seat %d %s. I say seat %d is the wolf; vote seat %d." % (pick, why, pick, pick)[:500]
+    return ("Seat %d %s. I say seat %d is the wolf. Vote seat %d with me."
+            % (pick, why, pick, pick))[:500]
 
 
 def speak(g, max_chars, seed):
